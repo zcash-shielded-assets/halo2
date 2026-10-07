@@ -9,7 +9,8 @@ use crate::{
 use super::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation};
 
 use ff::WithSmallOrderMulGroup;
-use group::ff::{BatchInvert, Field};
+use group::ff::Field;
+use pasta_curves::arithmetic::{VartimeBatchInvert, VartimeField};
 
 use std::marker::PhantomData;
 
@@ -34,7 +35,7 @@ pub struct EvaluationDomain<F: Field> {
     barycentric_weight: F,
 }
 
-impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
+impl<F: WithSmallOrderMulGroup<3> + VartimeField> EvaluationDomain<F> {
     /// This constructs a new evaluation domain object based on the provided
     /// values $j, k$.
     pub fn new(j: u32, k: u32) -> Self {
@@ -125,7 +126,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             .chain(Some(&mut barycentric_weight))
             .chain(Some(&mut extended_omega_inv))
             .chain(Some(&mut omega_inv))
-            .batch_invert();
+            .batch_invert_vartime();
 
         EvaluationDomain {
             n,
@@ -144,7 +145,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             barycentric_weight,
         }
     }
+}
 
+impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// Obtains a polynomial in Lagrange form when given a vector of Lagrange
     /// coefficients of size `n`; panics if the provided vector is the wrong
     /// length.
@@ -416,7 +419,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         }
         point
     }
+}
 
+impl<F: WithSmallOrderMulGroup<3> + VartimeField> EvaluationDomain<F> {
     /// Computes evaluations (at the point `x`, where `xn = x^n`) of Lagrange
     /// basis polynomials `l_i(X)` defined such that `l_i(omega^i) = 1` and
     /// `l_i(omega^j) = 0` for all `j != i` at each provided rotation `i`.
@@ -459,7 +464,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 let result = x - self.rotate_omega(F::ONE, rotation);
                 results.push(result);
             }
-            results.iter_mut().batch_invert();
+            results.iter_mut().batch_invert_vartime();
         }
 
         let common = (xn - F::ONE) * self.barycentric_weight;
@@ -470,7 +475,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
 
         results
     }
+}
 
+impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// Gets the quotient polynomial's degree (as a multiple of n)
     pub fn get_quotient_poly_degree(&self) -> usize {
         self.quotient_poly_degree as usize
@@ -499,18 +506,19 @@ pub struct PinnedEvaluationDomain<'a, F: Field> {
 
 #[test]
 fn test_rotate() {
-    use rand_core::OsRng;
+    use rand::rngs::SysRng;
+    use rand_core::UnwrapErr;
 
     use crate::arithmetic::eval_polynomial;
     use crate::pasta::pallas::Scalar;
 
     let domain = EvaluationDomain::<Scalar>::new(1, 3);
-    let rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
 
     let mut poly = domain.empty_lagrange();
     assert_eq!(poly.len(), 8);
     for value in poly.iter_mut() {
-        *value = Scalar::random(rng);
+        *value = Scalar::random(&mut rng);
     }
 
     let poly_rotated_cur = poly.rotate(Rotation::cur());
@@ -522,7 +530,7 @@ fn test_rotate() {
     let poly_rotated_next = domain.lagrange_to_coeff(poly_rotated_next);
     let poly_rotated_prev = domain.lagrange_to_coeff(poly_rotated_prev);
 
-    let x = Scalar::random(rng);
+    let x = Scalar::random(&mut rng);
 
     assert_eq!(
         eval_polynomial(&poly[..], x),
@@ -540,7 +548,8 @@ fn test_rotate() {
 
 #[test]
 fn test_l_i() {
-    use rand_core::OsRng;
+    use rand::rngs::SysRng;
+    use rand_core::UnwrapErr;
 
     use crate::arithmetic::{eval_polynomial, lagrange_interpolate};
     use crate::pasta::pallas::Scalar;
@@ -558,7 +567,7 @@ fn test_l_i() {
         l.push(l_i);
     }
 
-    let x = Scalar::random(OsRng);
+    let x = Scalar::random(&mut UnwrapErr(SysRng));
     let xn = x.pow([8, 0, 0, 0]);
 
     let evaluations = domain.l_i_range(x, xn, -7..=7);
@@ -571,7 +580,8 @@ fn test_l_i() {
 #[test]
 fn test_get_chunk_of_rotated_extended() {
     use pasta_curves::pallas;
-    use rand_core::OsRng;
+    use rand::rngs::SysRng;
+    use rand_core::UnwrapErr;
 
     let k = 11;
     let domain = EvaluationDomain::<pallas::Base>::new(3, k);
@@ -579,7 +589,7 @@ fn test_get_chunk_of_rotated_extended() {
     // Create a random polynomial.
     let mut poly = domain.empty_extended();
     for coefficient in poly.iter_mut() {
-        *coefficient = pallas::Base::random(OsRng);
+        *coefficient = pallas::Base::random(&mut UnwrapErr(SysRng));
     }
 
     // Pick a chunk size that is guaranteed to not be a multiple of the polynomial

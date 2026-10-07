@@ -1,6 +1,5 @@
 use ff::Field;
-use group::Curve;
-use rand_core::RngCore;
+use rand_core::Rng;
 use std::iter;
 use std::ops::RangeTo;
 
@@ -13,7 +12,7 @@ use super::{
     ChallengeY, Error, ProvingKey,
 };
 use crate::{
-    arithmetic::{eval_polynomial, CurveAffine},
+    arithmetic::{eval_polynomial, CurveAffine, CurveExt},
     circuit::Value,
     plonk::Assigned,
     poly::{
@@ -35,7 +34,7 @@ use crate::{
 pub fn create_proof<
     C: CurveAffine,
     E: EncodedChallenge<C>,
-    R: RngCore,
+    R: Rng,
     T: TranscriptWrite<C, E>,
     ConcreteCircuit: Circuit<C::Scalar>,
 >(
@@ -96,7 +95,10 @@ pub fn create_proof<
                 .collect();
             let mut instance_commitments =
                 vec![C::identity(); instance_commitments_projective.len()];
-            C::Curve::batch_normalize(&instance_commitments_projective, &mut instance_commitments);
+            C::Curve::batch_normalize_vartime(
+                &instance_commitments_projective,
+                &mut instance_commitments,
+            );
             let instance_commitments = instance_commitments;
             drop(instance_commitments_projective);
 
@@ -308,7 +310,10 @@ pub fn create_proof<
                 .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
                 .collect();
             let mut advice_commitments = vec![C::identity(); advice_commitments_projective.len()];
-            C::Curve::batch_normalize(&advice_commitments_projective, &mut advice_commitments);
+            C::Curve::batch_normalize_vartime(
+                &advice_commitments_projective,
+                &mut advice_commitments,
+            );
             let advice_commitments = advice_commitments;
             drop(advice_commitments_projective);
 
@@ -732,7 +737,8 @@ fn test_create_proof() {
         transcript::{Blake2bWrite, Challenge255},
     };
     use pasta_curves::EqAffine;
-    use rand_core::OsRng;
+    use rand::rngs::SysRng;
+    use rand_core::UnwrapErr;
 
     #[derive(Clone, Copy)]
     struct MyCircuit;
@@ -768,7 +774,7 @@ fn test_create_proof() {
         &pk,
         &[MyCircuit, MyCircuit],
         &[],
-        OsRng,
+        UnwrapErr(SysRng),
         &mut transcript,
     );
     assert!(matches!(proof.unwrap_err(), Error::InvalidInstances));
@@ -779,7 +785,7 @@ fn test_create_proof() {
         &pk,
         &[MyCircuit, MyCircuit],
         &[&[], &[]],
-        OsRng,
+        UnwrapErr(SysRng),
         &mut transcript,
     )
     .expect("proof generation should not fail");

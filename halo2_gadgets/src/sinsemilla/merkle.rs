@@ -120,7 +120,7 @@ where
         leaf: MerkleChip::Var,
     ) -> Result<MerkleChip::Var, Error> {
         // Each chip processes `ceil(PATH_LENGTH / PAR)` layers.
-        let layers_per_chip = (PATH_LENGTH + PAR - 1) / PAR;
+        let layers_per_chip = PATH_LENGTH.div_ceil(PAR);
 
         // Assign each layer to a chip.
         let chips = (0..PATH_LENGTH).map(|i| self.chips[i / layers_per_chip].clone());
@@ -158,7 +158,7 @@ where
             // Compute the node in layer l from its children:
             //     M^l_i = MerkleCRH(l, M^{l+1}_{2i}, M^{l+1}_{2i+1})
             node = chip.hash_layer(
-                layouter.namespace(|| format!("MerkleCRH({}, left, right)", l)),
+                layouter.namespace(|| format!("MerkleCRH({l}, left, right)")),
                 Q,
                 l,
                 pair.0,
@@ -204,7 +204,7 @@ pub mod tests {
         plonk::{Circuit, ConstraintSystem, Error},
     };
 
-    use rand::{rngs::OsRng, RngCore};
+    use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
     use std::{convert::TryInto, iter, marker::PhantomData};
 
     const MERKLE_DEPTH: usize = 32;
@@ -393,15 +393,15 @@ pub mod tests {
     }
 
     fn generate_circuit<Lookup: PallasLookupRangeCheck>() -> MyMerkleCircuit<Lookup> {
-        let mut rng = OsRng;
+        let mut rng = UnwrapErr(SysRng);
 
         // Choose a random leaf and position
-        let leaf = pallas::Base::random(rng);
+        let leaf = pallas::Base::random(&mut rng);
         let pos = rng.next_u32();
 
         // Choose a path of random inner nodes
         let path: Vec<_> = (0..(MERKLE_DEPTH))
-            .map(|_| pallas::Base::random(rng))
+            .map(|_| pallas::Base::random(&mut rng))
             .collect();
 
         // The root is provided as a public input in the Orchard circuit.
@@ -574,15 +574,15 @@ pub mod tests {
 
     fn generate_circuit_4_5b<Lookup: PallasLookupRangeCheck>(
     ) -> MyMerkleCircuitWithHashFromPrivatePoint<Lookup> {
-        let mut rng = OsRng;
+        let mut rng = UnwrapErr(SysRng);
 
         // Choose a random leaf and position
-        let leaf = pallas::Base::random(rng);
+        let leaf = pallas::Base::random(&mut rng);
         let pos = rng.next_u32();
 
         // Choose a path of random inner nodes
         let path: Vec<_> = (0..(MERKLE_DEPTH))
-            .map(|_| pallas::Base::random(rng))
+            .map(|_| pallas::Base::random(&mut rng))
             .collect();
 
         // The root is provided as a public input in the Orchard circuit.

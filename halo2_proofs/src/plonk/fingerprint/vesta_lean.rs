@@ -9,29 +9,41 @@
 //! Commitments and the complete verifier URS are emitted as validated concrete Vesta points, shared
 //! across the VK, proof string, transcript, and MSM.
 //!
-//! Trust boundary: the fixture attests that the assembled MSM matches, and evaluates to the
-//! identity, for *these* captured commitments and challenges. The emitted `vk` mirrors halo2's
+//! Trust boundary: the fixture attests that the assembled MSM matches — and, for accepting
+//! captures, evaluates to the identity — for *these* captured commitments and challenges. The
+//! emitted `vk` mirrors halo2's
 //! `VerifyingKey` field-for-field — circuit-fixed data only — so it stays faithful to the pinned Rust
 //! key; the instance commitment is *not* a VK field. Instead the fixture re-derives it from the
 //! public inputs (`commit_lagrange` of the zero-padded instance columns, exposed as
 //! `derivedInstanceCommitment`), feeds *that* to `assemble`, and checks it against the captured
 //! commitments (`instance_commitments_derived`), so instance commitments no longer enter as opaque
 //! points nor masquerade as VK data. It does not reproduce Halo2's Blake2b transcript or pinned-key
-//! serialization; those remain trusted from the Rust capture. Halo2's `MSM` also merges same-base
+//! serialization; those remain trusted from the Rust capture. Given the proof byte string the
+//! verifier consumed ([`VerifyingKey::dump_vesta_lean_fixture_honest_with_proof_bytes`]), it checks that
+//! re-serializing the recorded proof reads reproduces those bytes exactly and carries them in the
+//! fixture as `capturedProofHex`, so a consumer can check its own proof-string decoder against the
+//! bytes the deployed verifier read. Halo2's `MSM` also merges same-base
 //! terms and drops identity bases, where the Lean assembly deliberately does neither; such a capture
 //! is rejected at export (see [`VerifyingKey::dump_vesta_lean_fixture`]) rather than emitted.
 //!
-//! Only accepting runs are exported. [`VerifyingKey::dump_vesta_lean_fixture`] verifies the captured
-//! MSM is the group identity before emitting anything, so every exported fixture proves
-//! `capturedMsm.evalNat capturedURS = 0` and Lean checks exact MSM agreement against it. Invalid
-//! captures are not modelled in Lean: they are rejected by the deployed verifier (or checked as
-//! non-identity) in Rust, which is where the negative-path coverage lives. Exporting a rejecting
-//! run as its own fixture was considered and dropped in favour of this fail-fast: it doubled the
-//! exporter surface for a cross-check that a trivially-accepting Lean `assemble` would already fail
-//! on the accepting fixtures.
+//! Two exporters share one emission path. [`VerifyingKey::dump_vesta_lean_fixture`] is the
+//! accepting exporter: it verifies the captured MSM is the group identity before emitting
+//! anything, so every honest fixture proves `capturedMsm.evalNat capturedURS = 0` alongside the
+//! match theorem. [`VerifyingKey::dump_vesta_lean_fixture_match_only`] is its sibling for
+//! non-accepting captures, of which random-input captures are the motivating case — the mode is
+//! selected by the captured MSM, so non-acceptance is what the export checks and randomness is the
+//! caller's business. The deployed verifier ran to completion, but the captured MSM is
+//! deliberately *not* the identity — verified before emitting anything — so the fixture emits the
+//! match theorem alongside `capturedMsm.evalNat capturedURS ≠ 0`, the mirror of the honest eval
+//! theorem. Either way the fixture proves its own mode rather than asserting it in a header
+//! comment. Rejecting runs of *honest* proofs remain Rust-only
+//! checks (they are non-identity / rejected by the deployed verifier), never exported to Lean:
+//! exporting a rejecting run as its own fixture was considered and dropped because it doubled the
+//! exporter surface for a cross-check that a trivially-accepting Lean `assemble` would already
+//! fail on the accepting fixtures.
 
-use ff::{Field, PrimeField};
-use group::Curve;
+use ff::{Field, FromUniformBytes, PrimeField};
+use pasta_curves::arithmetic::CurveExt;
 use std::collections::{BTreeSet, HashMap};
 use std::io::Read;
 
@@ -39,7 +51,7 @@ use super::{ChallengeRecorder, TranscriptEvent};
 use crate::arithmetic::{Coordinates, CurveAffine};
 use crate::pasta::{EqAffine, Fp, Fq};
 use crate::poly::commitment::{Blind, MSM};
-use crate::transcript::Challenge255;
+use crate::transcript::{Blake2bWrite, Challenge255, TranscriptWrite};
 
 use super::super::circuit::{Any, Expression};
 use super::super::VerifyingKey;
@@ -177,6 +189,37 @@ fn join_fps(xs: &[Fp]) -> String {
     xs.iter().map(|x| fp(*x)).collect::<Vec<_>>().join(", ")
 }
 
+/// Lowercase hex, two digits per byte, no separators.
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(2 * bytes.len());
+    for b in bytes {
+        write!(out, "{b:02x}").expect("writing to a String cannot fail");
+    }
+    out
+}
+
+/// Re-serialize the proof reads the recorder observed, as the prover writes them: `write_point`
+/// (the compressed encoding) for each `ReadPoint` and `write_scalar` for each `ReadScalar`, in
+/// read order. Common inputs and squeezes consume no proof bytes.
+fn reserialize_proof_reads(events: &[TranscriptEvent<EqAffine>]) -> Vec<u8> {
+    let mut transcript = Blake2bWrite::<Vec<u8>, EqAffine, Challenge255<EqAffine>>::init(vec![]);
+    for event in events {
+        match event {
+            TranscriptEvent::ReadPoint(point) => transcript
+                .write_point(*point)
+                .expect("writing to an in-memory transcript cannot fail"),
+            TranscriptEvent::ReadScalar(scalar) => transcript
+                .write_scalar(*scalar)
+                .expect("writing to an in-memory transcript cannot fail"),
+            TranscriptEvent::CommonPoint(_)
+            | TranscriptEvent::CommonScalar(_)
+            | TranscriptEvent::Squeeze(_) => {}
+        }
+    }
+    transcript.finalize()
+}
+
 /// Serialize one gate / lookup `Expression` to a Lean `Expr Fp` literal (mirrors the verifier's
 /// `Expression::evaluate`; virtual selectors are removed before verification).
 fn expr_to_lean(e: &Expression<Fp>) -> String {
@@ -186,9 +229,9 @@ fn expr_to_lean(e: &Expression<Fp>) -> String {
         &|q| format!("(.fixed {})", q.index),
         &|q| format!("(.advice {})", q.index),
         &|q| format!("(.instance {})", q.index),
-        &|a: String| format!("(.negated {})", a),
-        &|a: String, b: String| format!("(.sum {} {})", a, b),
-        &|a: String, b: String| format!("(.product {} {})", a, b),
+        &|a: String| format!("(.negated {a})"),
+        &|a: String, b: String| format!("(.sum {a} {b})"),
+        &|a: String, b: String| format!("(.product {a} {b})"),
         &|a: String, c| format!("(.scaled {} {})", a, fp(c)),
     )
 }
@@ -251,6 +294,22 @@ fn render_transcript_capture(
     (captured_init, schedule_entries)
 }
 
+/// Which theorem family the exporter emits, and which identity fail-fast it enforces.
+///
+/// Every dispatch on this is a `match` listing both variants, never an equality test with an
+/// implicit fallthrough: a new mode must fail to compile at each site until its fail-fast, its
+/// theorem set, and its header are all chosen. `#[non_exhaustive]` is inert while the enum is
+/// private and records the same intent for the day it is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+enum FixtureMode {
+    /// Accepting capture: the MSM must be the identity; the eval theorems are emitted.
+    Honest,
+    /// Non-accepting capture: the MSM must *not* be the identity, and the match theorem is
+    /// emitted alongside the mirrored `≠ 0` eval theorem.
+    MatchOnly,
+}
+
 impl VerifyingKey<EqAffine> {
     /// Emit the Vesta Lean fixture for one captured proof (see module docs).
     ///
@@ -275,6 +334,127 @@ impl VerifyingKey<EqAffine> {
         recorder: &ChallengeRecorder<R, EqAffine, Challenge255<EqAffine>>,
         captured_msm: &MSM<'_, EqAffine>,
     ) -> String {
+        self.dump_vesta_lean_fixture_with_mode(
+            FixtureMode::Honest,
+            lean_namespace,
+            circuit_id,
+            k,
+            instances,
+            recorder,
+            captured_msm,
+            None,
+        )
+    }
+
+    /// As [`VerifyingKey::dump_vesta_lean_fixture`], additionally given `proof_bytes`, the proof
+    /// byte string the verifier consumed in this run, which the fixture then carries hex-encoded as
+    /// `capturedProofHex`.
+    ///
+    /// The exporter fails fast unless re-serializing the recorder's proof reads (`write_point` for
+    /// each point read, `write_scalar` for each scalar read, in read order) reproduces `proof_bytes`
+    /// exactly: the bytes must be precisely what the verifier's reads consumed, with no trailing
+    /// data, so the emitted typed proof `ps` is their canonical parse. A consumer can then check its
+    /// own proof-string decoder against the bytes the deployed verifier read.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dump_vesta_lean_fixture_honest_with_proof_bytes<R: Read>(
+        &self,
+        lean_namespace: &str,
+        circuit_id: &str,
+        k: u32,
+        instances: &[&[&[Fp]]],
+        recorder: &ChallengeRecorder<R, EqAffine, Challenge255<EqAffine>>,
+        captured_msm: &MSM<'_, EqAffine>,
+        proof_bytes: &[u8],
+    ) -> String {
+        self.dump_vesta_lean_fixture_with_mode(
+            FixtureMode::Honest,
+            lean_namespace,
+            circuit_id,
+            k,
+            instances,
+            recorder,
+            captured_msm,
+            Some(proof_bytes),
+        )
+    }
+
+    /// Emit a *match-only* Vesta Lean fixture for one captured non-accepting run (see module docs).
+    ///
+    /// The sibling of [`VerifyingKey::dump_vesta_lean_fixture`] for non-accepting captures —
+    /// random proof strings are why it exists, but randomness is not something the export can
+    /// check, so non-acceptance is the contract. The deployed verifier ran to completion and the
+    /// captured MSM is deliberately **not** the group identity, so the fixture emits
+    /// `fingerprint_matches` — exact coefficient/term agreement of the Lean-assembled MSM with the
+    /// capture — plus `capturedMsm_evalNat_ne_zero` in place of the honest eval theorems, so the
+    /// fixture proves it is non-accepting. The export fails fast
+    /// if the captured MSM *is* the identity: accepting captures must use the honest exporter so
+    /// their fixtures keep proving `capturedMsm.evalNat = 0`. Everything else — coordinate
+    /// ordering, on-curve validation, URS emission, instance-commitment re-derivation, schedule
+    /// entries, and the slot-reconstruction and term-count guards — is identical to the honest
+    /// exporter, so regeneration stays bit-reproducible across both modes.
+    pub fn dump_vesta_lean_fixture_match_only<R: Read>(
+        &self,
+        lean_namespace: &str,
+        circuit_id: &str,
+        k: u32,
+        instances: &[&[&[Fp]]],
+        recorder: &ChallengeRecorder<R, EqAffine, Challenge255<EqAffine>>,
+        captured_msm: &MSM<'_, EqAffine>,
+    ) -> String {
+        self.dump_vesta_lean_fixture_with_mode(
+            FixtureMode::MatchOnly,
+            lean_namespace,
+            circuit_id,
+            k,
+            instances,
+            recorder,
+            captured_msm,
+            None,
+        )
+    }
+
+    /// As [`VerifyingKey::dump_vesta_lean_fixture_match_only`], additionally given `proof_bytes`,
+    /// which the fixture carries hex-encoded as `capturedProofHex` after the same
+    /// re-serialization check as
+    /// [`VerifyingKey::dump_vesta_lean_fixture_honest_with_proof_bytes`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn dump_vesta_lean_fixture_match_only_with_proof_bytes<R: Read>(
+        &self,
+        lean_namespace: &str,
+        circuit_id: &str,
+        k: u32,
+        instances: &[&[&[Fp]]],
+        recorder: &ChallengeRecorder<R, EqAffine, Challenge255<EqAffine>>,
+        captured_msm: &MSM<'_, EqAffine>,
+        proof_bytes: &[u8],
+    ) -> String {
+        self.dump_vesta_lean_fixture_with_mode(
+            FixtureMode::MatchOnly,
+            lean_namespace,
+            circuit_id,
+            k,
+            instances,
+            recorder,
+            captured_msm,
+            Some(proof_bytes),
+        )
+    }
+
+    // The public wrappers each carry the exporter's six or seven inputs; threading `mode` and the
+    // optional proof bytes through to the shared core adds two more past `&self`. Bundling them
+    // into a struct would only move the same arity to a constructor, since every one is required.
+    #[allow(clippy::too_many_arguments)]
+    fn dump_vesta_lean_fixture_with_mode<R: Read>(
+        &self,
+        mode: FixtureMode,
+        lean_namespace: &str,
+        circuit_id: &str,
+        k: u32,
+        instances: &[&[&[Fp]]],
+        recorder: &ChallengeRecorder<R, EqAffine, Challenge255<EqAffine>>,
+        captured_msm: &MSM<'_, EqAffine>,
+        proof_bytes: Option<&[u8]>,
+    ) -> String {
         // `lean_namespace` is spliced verbatim into `namespace`/`end`, and `circuit_id` is emitted
         // via `{:?}`, whose Rust string escapes (`\u{...}`, ...) are not Lean's. Validate both up
         // front — in release builds too, since this runs once per export and a malformed name yields
@@ -295,6 +475,19 @@ impl VerifyingKey<EqAffine> {
                     .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
             "circuit_id must be a non-empty ASCII slug (alphanumeric, `_`, `-`): {circuit_id:?}"
         );
+        // The supplied proof bytes must be exactly what the verifier's reads consumed: re-serializing
+        // the recorded reads as the prover writes them reproduces them byte for byte, so the typed
+        // proof emitted below is their canonical parse and no trailing data went unread.
+        if let Some(bytes) = proof_bytes {
+            let reserialized = reserialize_proof_reads(&recorder.events);
+            assert!(
+                reserialized == bytes,
+                "proof_bytes must be exactly the bytes the verifier's proof reads consume: \
+                 re-serializing the recorded reads gives {} bytes, the supplied string has {}",
+                reserialized.len(),
+                bytes.len()
+            );
+        }
 
         // The public instances' outer dimension is the proof count, exactly as in `verify_proof`.
         let num_proofs = instances.len();
@@ -306,13 +499,23 @@ impl VerifyingKey<EqAffine> {
         let transcript_events = recorder.events.as_slice();
 
         let params = captured_msm.params;
-        // The emitted `capturedMsm_eval_eq_zero` presupposes an accepting capture; fail fast here
-        // rather than export a fixture whose theorem cannot hold. Rejecting captures are checked in
-        // Rust (they are non-identity / rejected by the deployed verifier), never exported to Lean.
-        assert!(
-            captured_msm.clone().eval(),
-            "captured MSM must evaluate to the identity; the emitted fixture proves it"
-        );
+        // The honest mode's `capturedMsm_eval_eq_zero` presupposes an accepting capture, and the
+        // match-only mode's `capturedMsm_evalNat_ne_zero` presupposes the opposite; fail fast on a
+        // mode/capture mismatch rather than export a fixture whose theorem cannot hold, or one that
+        // mislabels an accepting run as match-only. This is the only thing that selects the mode:
+        // whether the caller's input was a random proof string is neither checked nor recorded.
+        // Rejecting runs of honest proofs are checked in Rust, never exported to Lean.
+        match mode {
+            FixtureMode::Honest => assert!(
+                captured_msm.clone().eval(),
+                "captured MSM must evaluate to the identity; the emitted fixture proves it"
+            ),
+            FixtureMode::MatchOnly => assert!(
+                !captured_msm.clone().eval(),
+                "match-only fixtures capture non-accepting runs, but this captured MSM evaluates \
+                 to the identity; export accepting captures with `dump_vesta_lean_fixture`"
+            ),
+        }
         let (msm_g, msm_w, msm_u, msm_other) = captured_msm.fingerprint_terms();
         let msm_g = msm_g.expect("captured MSM must contain verifier-generator coefficients");
         let msm_w = msm_w.expect("captured MSM must contain a blinding-generator coefficient");
@@ -370,7 +573,9 @@ impl VerifyingKey<EqAffine> {
                 let mut poly = column.to_vec();
                 poly.resize(params.n as usize, Fp::ZERO);
                 let poly = self.domain.lagrange_from_vec(poly);
-                let derived = params.commit_lagrange(&poly, Blind::default()).to_affine();
+                let derived = params
+                    .commit_lagrange(&poly, Blind::default())
+                    .to_affine_vartime();
                 assert_eq!(
                     derived,
                     common_points[p * n_inst_cols + col],
@@ -676,16 +881,14 @@ impl VerifyingKey<EqAffine> {
 
         // ---- Shape ----
         out.push_str(&format!(
-            "def shape : Shape := {{ k := {}, numProofs := {}, numAdviceColumns := {}, numLookups := {}, numPermutationSets := {}, numPermutationColumns := {}, numQuotientPieces := {}, numInstanceQueries := {}, numAdviceQueries := {}, numFixedQueries := {}, numPointSets := {} }}\n\n",
-            k, num_proofs, n_advice, n_lookups, n_perm_sets, n_perm_cols, n_quotient, n_inst_q, n_adv_q, n_fixed_q, n_point_sets,
+            "def shape : Shape := {{ k := {k}, numProofs := {num_proofs}, numAdviceColumns := {n_advice}, numLookups := {n_lookups}, numPermutationSets := {n_perm_sets}, numPermutationColumns := {n_perm_cols}, numQuotientPieces := {n_quotient}, numInstanceColumns := {n_inst_cols}, numInstanceQueries := {n_inst_q}, numAdviceQueries := {n_adv_q}, numFixedQueries := {n_fixed_q}, numPointSets := {n_point_sets} }}\n\n",
         ));
         out.push_str(&format!(
             "def capturedUrsG : List G := [{}]\n\n",
             urs_g.join(", ")
         ));
         out.push_str(&format!(
-            "def capturedURS : URS G := {{ k := {}, g := fun i => capturedUrsG.getD i.val 0, w := {}, u := {} }}\n\n",
-            k, urs_w, urs_u
+            "def capturedURS : URS G := {{ k := {k}, g := fun i => capturedUrsG.getD i.val 0, w := {urs_w}, u := {urs_u} }}\n\n"
         ));
         // `capturedURS.g` indexes `capturedUrsG` with `getD`, which silently yields the identity for
         // any index past the list's end; pin the length so a truncated URS cannot pass unnoticed.
@@ -698,6 +901,40 @@ impl VerifyingKey<EqAffine> {
         out.push_str(&format!(
             "def capturedVkTranscriptRepr : Fp := {}\n\n",
             fp(self.transcript_repr)
+        ));
+        // The exact string `VerifyingKey::from_parts` hashed into `transcript_repr`: the compact
+        // `Debug` rendering of the pinned key. Emitting it lets a consumer recompute the digest
+        // and read the pinned fields, instead of trusting the scalar above. The exporter checks the
+        // string is printable ASCII (so `{:?}` adds only the `\"` and `\\` escapes Lean shares)
+        // and that hashing it reproduces `transcript_repr`, so the emitted text is the preimage.
+        let pinned = format!("{:?}", self.pinned());
+        assert!(
+            pinned
+                .chars()
+                .all(|c| c.is_ascii() && !c.is_ascii_control()),
+            "the pinned key description must be printable ASCII"
+        );
+        {
+            let mut hasher = blake2b_simd::Params::new()
+                .hash_length(64)
+                .personal(b"Halo2-Verify-Key")
+                .to_state();
+            hasher.update(&(pinned.len() as u64).to_le_bytes());
+            hasher.update(pinned.as_bytes());
+            let recomputed = Fp::from_uniform_bytes(hasher.finalize().as_array());
+            assert!(
+                recomputed == self.transcript_repr,
+                "hashing the pinned key description must reproduce transcript_repr"
+            );
+        }
+        out.push_str("/-- The exact text `VerifyingKey::from_parts` hashed into `capturedVkTranscriptRepr`:\n");
+        out.push_str("the compact `Debug` rendering of the pinned key (`Halo2-Verify-Key` BLAKE2b over its\n");
+        out.push_str(
+            "little-endian `u64` byte length then its bytes, reduced modulo `p`). The exporter\n",
+        );
+        out.push_str("re-hashed it and checked the scalar above before emitting. -/\n");
+        out.push_str(&format!(
+            "def capturedPinnedKeyDescription : String :=\n  {pinned:?}\n\n"
         ));
 
         // ---- gates ----
@@ -732,11 +969,11 @@ impl VerifyingKey<EqAffine> {
             for col in chunk {
                 let qi = cs.get_any_query_index(*col);
                 let cref = match col.column_type() {
-                    Any::Advice => format!("(.advice {})", qi),
-                    Any::Fixed => format!("(.fixed {})", qi),
-                    Any::Instance => format!("(.instance {})", qi),
+                    Any::Advice => format!("(.advice {qi})"),
+                    Any::Fixed => format!("(.fixed {qi})"),
+                    Any::Instance => format!("(.instance {qi})"),
                 };
-                entries.push(format!("({}, {})", cref, gidx));
+                entries.push(format!("({cref}, {gidx})"));
                 gidx += 1;
             }
             chunks.push(format!("[{}]", entries.join(", ")));
@@ -777,10 +1014,9 @@ impl VerifyingKey<EqAffine> {
         let inst_comm_points = points.point_refs(common_points);
         let perm_comm_points = points.point_refs(self.permutation.commitments());
 
-        out.push_str(&format!(
-            "def capturedNumInstanceColumns : ℕ := {}\n\n",
-            n_inst_cols
-        ));
+        // Defined through `shape` rather than re-emitting `n_inst_cols`, so the standalone name and
+        // the shape field cannot drift: both now trace to the same captured Rust value.
+        out.push_str("def capturedNumInstanceColumns : ℕ := shape.numInstanceColumns\n\n");
         out.push_str(&format!(
             "def capturedFixedCommitments : List G := [{}]\n\n",
             join(&fixed_points)
@@ -871,10 +1107,10 @@ impl VerifyingKey<EqAffine> {
         );
         out.push_str("def vk : VerifyingKey shape Fp G := {\n");
         out.push_str(&format!("  omega := {},\n", fp(self.domain.get_omega())));
-        out.push_str(&format!("  n := {},\n", n));
-        out.push_str(&format!("  blindingFactors := {},\n", blinding));
+        out.push_str(&format!("  n := {n},\n"));
+        out.push_str(&format!("  blindingFactors := {blinding},\n"));
         out.push_str(&format!("  delta := {},\n", fp(Fp::DELTA)));
-        out.push_str(&format!("  chunkLen := {},\n", chunk_len));
+        out.push_str(&format!("  chunkLen := {chunk_len},\n"));
         out.push_str(&format!("  gates := [{}],\n", gates.join(", ")));
         out.push_str(&format!(
             "  instanceQueryLayout := [{}],\n",
@@ -1017,26 +1253,20 @@ impl VerifyingKey<EqAffine> {
         ));
 
         out.push_str("def ps : ProofString shape Fp G := {\n");
-        out.push_str(&format!("  adviceCommitments := fun p c => capturedAdviceCommitments.getD (p.val * {} + c.val) 0,\n", n_advice));
-        out.push_str(&format!("  lookupPermutedInput := fun p l => capturedLookupPermutedInput.getD (p.val * {} + l.val) 0,\n", n_lookups));
-        out.push_str(&format!("  lookupPermutedTable := fun p l => capturedLookupPermutedTable.getD (p.val * {} + l.val) 0,\n", n_lookups));
-        out.push_str(&format!("  permutationProduct := fun p s => capturedPermutationProducts.getD (p.val * {} + s.val) 0,\n", n_perm_sets));
+        out.push_str(&format!("  adviceCommitments := fun p c => capturedAdviceCommitments.getD (p.val * {n_advice} + c.val) 0,\n"));
+        out.push_str(&format!("  lookupPermutedInput := fun p l => capturedLookupPermutedInput.getD (p.val * {n_lookups} + l.val) 0,\n"));
+        out.push_str(&format!("  lookupPermutedTable := fun p l => capturedLookupPermutedTable.getD (p.val * {n_lookups} + l.val) 0,\n"));
+        out.push_str(&format!("  permutationProduct := fun p s => capturedPermutationProducts.getD (p.val * {n_perm_sets} + s.val) 0,\n"));
         out.push_str(&format!(
-            "  lookupProduct := fun p l => capturedLookupProducts.getD (p.val * {} + l.val) 0,\n",
-            n_lookups
+            "  lookupProduct := fun p l => capturedLookupProducts.getD (p.val * {n_lookups} + l.val) 0,\n"
         ));
-        out.push_str(&format!(
-            "  vanishingRandom := {},\n",
-            vanishing_random_point
-        ));
+        out.push_str(&format!("  vanishingRandom := {vanishing_random_point},\n"));
         out.push_str("  hPieces := fun i => capturedHPieces.getD i.val 0,\n");
         out.push_str(&format!(
-            "  instanceEvals := fun p q => capturedInstanceEvals.getD (p.val * {} + q.val) 0,\n",
-            n_inst_q
+            "  instanceEvals := fun p q => capturedInstanceEvals.getD (p.val * {n_inst_q} + q.val) 0,\n"
         ));
         out.push_str(&format!(
-            "  adviceEvals := fun p q => capturedAdviceEvals.getD (p.val * {} + q.val) 0,\n",
-            n_adv_q
+            "  adviceEvals := fun p q => capturedAdviceEvals.getD (p.val * {n_adv_q} + q.val) 0,\n"
         ));
         out.push_str("  fixedEvals := fun q => capturedFixedEvals.getD q.val 0,\n");
         out.push_str(&format!(
@@ -1046,11 +1276,11 @@ impl VerifyingKey<EqAffine> {
         out.push_str(
             "  permutationCommonEvals := fun i => capturedPermutationCommonEvals.getD i.val 0,\n",
         );
-        out.push_str(&format!("  permutationSetEvals := fun p s => capturedPermutationSetEvals.getD (p.val * {} + s.val) {{ eval := 0, nextEval := 0, lastEval := none }},\n", n_perm_sets));
-        out.push_str(&format!("  lookupEvals := fun p l => capturedLookupEvals.getD (p.val * {} + l.val) {{ productEval := 0, productNextEval := 0, permutedInputEval := 0, permutedInputInvEval := 0, permutedTableEval := 0 }},\n", n_lookups));
-        out.push_str(&format!("  multiopenQPrime := {},\n", q_prime_point));
+        out.push_str(&format!("  permutationSetEvals := fun p s => capturedPermutationSetEvals.getD (p.val * {n_perm_sets} + s.val) {{ eval := 0, nextEval := 0, lastEval := none }},\n"));
+        out.push_str(&format!("  lookupEvals := fun p l => capturedLookupEvals.getD (p.val * {n_lookups} + l.val) {{ productEval := 0, productNextEval := 0, permutedInputEval := 0, permutedInputInvEval := 0, permutedTableEval := 0 }},\n"));
+        out.push_str(&format!("  multiopenQPrime := {q_prime_point},\n"));
         out.push_str("  multiopenU := fun s => capturedMultiopenU.getD s.val 0,\n");
-        out.push_str(&format!("  ipaS := {},\n", ipa_s_point));
+        out.push_str(&format!("  ipaS := {ipa_s_point},\n"));
         out.push_str("  ipaRounds := fun j => capturedIpaRounds.getD j.val (0, 0),\n");
         out.push_str(&format!("  ipaC := {},\n", fp(ipa_c)));
         out.push_str(&format!("  ipaF := {} }}\n\n", fp(ipa_f)));
@@ -1114,6 +1344,24 @@ impl VerifyingKey<EqAffine> {
         out.push_str("def capturedScheduleEntries : List (List (TranscriptElt Fp G) × Fp) :=\n");
         out.push_str(&format!("  [{}]\n\n", schedule_entries.join(", ")));
 
+        // ---- captured proof bytes ----
+        if let Some(bytes) = proof_bytes {
+            out.push_str(
+                "/-- The proof string the verifier consumed in this capture, hex-encoded. The\n",
+            );
+            out.push_str(
+                "exporter checked that re-serializing the recorded proof reads (`write_point`,\n",
+            );
+            out.push_str(
+                "`write_scalar`, in read order) reproduces these bytes exactly, so `ps` is their\n",
+            );
+            out.push_str("canonical parse. -/\n");
+            out.push_str(&format!(
+                "def capturedProofHex : String :=\n  {:?}\n\n",
+                hex_lower(bytes)
+            ));
+        }
+
         // ---- captured MSM ----
         let other_lits: Vec<String> = msm_other
             .iter()
@@ -1133,30 +1381,63 @@ impl VerifyingKey<EqAffine> {
         out.push_str(&format!("  other := [{}] }}\n\n", other_lits.join(", ")));
 
         out.push_str("theorem fingerprint_matches : MsmMatch (assemble vk derivedInstanceCommitment ps ch) capturedMsm := by native_decide\n\n");
-        out.push_str("theorem capturedMsm_eval_eq_zero : capturedMsm.evalNat capturedURS = 0 := by native_decide\n\n");
-        out.push_str(
-            "/-- Meaningful jointly with `fingerprint_matches`: `assemble`'s zero-MSM rejection\n",
-        );
-        out.push_str(
-            "fallback also evaluates to zero, so this statement alone is not acceptance. -/\n",
-        );
-        out.push_str("theorem assembledMsm_eval_eq_zero : (assemble vk derivedInstanceCommitment ps ch).evalNat capturedURS = 0 := by\n");
-        out.push_str("  rw [msmMatch_evalNat capturedURS fingerprint_matches]\n");
-        out.push_str("  exact capturedMsm_eval_eq_zero\n\n");
-        out.push_str(&format!("end {}\n", lean_namespace));
+        match mode {
+            FixtureMode::Honest => {
+                out.push_str("theorem capturedMsm_eval_eq_zero : capturedMsm.evalNat capturedURS = 0 := by native_decide\n\n");
+                out.push_str(
+                    "/-- Meaningful jointly with `fingerprint_matches`: `assemble`'s zero-MSM rejection\n",
+                );
+                out.push_str(
+                    "fallback also evaluates to zero, so this statement alone is not acceptance. -/\n",
+                );
+                out.push_str("theorem assembledMsm_eval_eq_zero : (assemble vk derivedInstanceCommitment ps ch).evalNat capturedURS = 0 := by\n");
+                out.push_str("  rw [msmMatch_evalNat capturedURS fingerprint_matches]\n");
+                out.push_str("  exact capturedMsm_eval_eq_zero\n\n");
+            }
+            // The mirror of the honest eval theorem. `= 0` would be false here, but stating the
+            // negation keeps the fixture self-certifying about its own mode — a mislabeled
+            // accepting capture or a dead export cannot pass for a non-accepting one — and gives
+            // the generated file the aliveness check the honest families get from their eval
+            // theorems. The Rust export already fail-fasts on an identity capture; this is the
+            // same fact, checked again by Lean against the emitted data.
+            FixtureMode::MatchOnly => {
+                out.push_str(
+                    "/-- The captured MSM does not evaluate to the identity: this capture is\n",
+                );
+                out.push_str("genuinely non-accepting, so a mislabeled accepting capture or dead export plumbing\n");
+                out.push_str("cannot pass for it. -/\n");
+                out.push_str("theorem capturedMsm_evalNat_ne_zero : capturedMsm.evalNat capturedURS ≠ 0 := by native_decide\n\n");
+            }
+        }
+        out.push_str(&format!("end {lean_namespace}\n"));
 
         let body = out;
         let point_coordinates = points.coordinate_literals();
         let mut out = String::new();
-        out.push_str(
-            "-- Auto-generated by halo2 `dump_vesta_lean_fixture`. Do not edit by hand.\n",
-        );
+        match mode {
+            FixtureMode::Honest => out.push_str(
+                "-- Auto-generated by halo2 `dump_vesta_lean_fixture`. Do not edit by hand.\n",
+            ),
+            FixtureMode::MatchOnly => {
+                out.push_str("-- Auto-generated by halo2 `dump_vesta_lean_fixture_match_only`. Do not edit by hand.\n");
+                out.push_str("-- Match-only capture: the deployed verifier ran to completion, but the captured\n");
+                out.push_str(
+                    "-- MSM is deliberately NOT the identity (a non-accepting run), as proved below\n",
+                );
+                out.push_str(
+                    "-- by `capturedMsm_evalNat_ne_zero`. This fixture witnesses coefficient\n",
+                );
+                out.push_str(
+                    "-- agreement; what made the run non-accepting is the caller's business and is\n",
+                );
+                out.push_str("-- not attested here.\n");
+            }
+        }
         // `maxRecDepth` is raised for the deeply-nested literals (the 2048-element URS and
         // g-scalar arrays, point-coordinate validation, and gate Expr trees) that `native_decide`
         // compiles.
         out.push_str(&format!(
-            "import Zcash.Snark\n\nset_option maxRecDepth 1000000\n\nnamespace {}\n\nopen Zcash.Snark\nopen CompElliptic.CurveForms.ShortWeierstrass\nopen CompElliptic.Curves.Pasta\nopen CompElliptic.Fields.Pasta\n\n",
-            lean_namespace
+            "import Zcash.Snark\n\nset_option maxRecDepth 1000000\n\nnamespace {lean_namespace}\n\nopen Zcash.Snark\nopen CompElliptic.CurveForms.ShortWeierstrass\nopen CompElliptic.Curves.Pasta\nopen CompElliptic.Fields.Pasta\n\n"
         ));
         out.push_str("/-- Scalar field element from four little-endian u64 limbs. -/\n");
         out.push_str("def mkFp (a b c d : ℕ) : Fp := (a : Fp) + (b : Fp) * (2 : Fp) ^ 64 + (c : Fp) * (2 : Fp) ^ 128 + (d : Fp) * (2 : Fp) ^ 192\n\n");
@@ -1166,8 +1447,7 @@ impl VerifyingKey<EqAffine> {
         out.push_str("abbrev G := VestaG\n\n");
         out.push_str("instance : Inhabited G := ⟨0⟩\n\n");
         out.push_str(&format!(
-            "def capturedCircuitId : String := {:?}\n\n",
-            circuit_id
+            "def capturedCircuitId : String := {circuit_id:?}\n\n"
         ));
         out.push_str("/-- Canonical affine coordinates for every distinct Vesta point used by this fixture. -/\n");
         out.push_str(&format!(
@@ -1193,7 +1473,7 @@ impl VerifyingKey<EqAffine> {
 
 #[cfg(test)]
 mod tests {
-    use group::prime::PrimeCurveAffine;
+    use group::CurveAffine as _;
 
     use super::*;
 
@@ -1217,6 +1497,27 @@ mod tests {
         assert_eq!(schedule_entries.len(), 2);
         assert!(schedule_entries[0].ends_with(&format!(", {})", fp(theta))));
         assert!(schedule_entries[1].ends_with(&format!(", {})", fp(beta))));
+    }
+
+    #[test]
+    fn proof_reads_reserialize_as_the_prover_writes() {
+        let point = EqAffine::generator();
+        let scalar = Fp::from(7);
+        let events = [
+            TranscriptEvent::CommonScalar(Fp::from(1)),
+            TranscriptEvent::ReadPoint(point),
+            TranscriptEvent::Squeeze(Fp::from(2)),
+            TranscriptEvent::ReadScalar(scalar),
+        ];
+
+        let mut expected = Blake2bWrite::<Vec<u8>, EqAffine, Challenge255<EqAffine>>::init(vec![]);
+        expected.write_point(point).unwrap();
+        expected.write_scalar(scalar).unwrap();
+        let expected = expected.finalize();
+
+        assert_eq!(reserialize_proof_reads(&events), expected);
+        assert_eq!(expected.len(), 64);
+        assert_eq!(hex_lower(&[0x00, 0x6e, 0xff]), "006eff");
     }
 
     #[test]

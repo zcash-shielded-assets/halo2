@@ -7,6 +7,11 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-29
+### Changed
+- The minimum supported Rust version is now 1.88.
+- Migrated to `ff 0.14`, `group 0.14`, `pasta_curves 0.6`.
+
 ## [0.1.0] - 2024-12-16
 Initial release, extracted from `halo2_gadgets 0.3.0`. Includes minor changes
 for `no-std` support.

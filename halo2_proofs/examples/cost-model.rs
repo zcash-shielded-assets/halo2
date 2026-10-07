@@ -6,9 +6,12 @@ use std::{
 };
 
 use ff::Field;
-use group::{Curve, Group};
+use group::Group;
 use gumdrop::Options;
 use halo2_proofs::{arithmetic::best_multiexp, pasta::pallas};
+use pasta_curves::arithmetic::CurveExt;
+use rand::rngs::SysRng;
+use rand_core::UnwrapErr;
 
 struct Estimator {
     /// Scalars for estimating multiexp performance.
@@ -26,14 +29,14 @@ impl fmt::Debug for Estimator {
 impl Estimator {
     fn random(k: usize) -> Self {
         let max_size = 1 << (k + 1);
-        let mut rng = rand_core::OsRng;
+        let mut rng = UnwrapErr(SysRng);
 
         Estimator {
             multiexp_scalars: (0..max_size)
                 .map(|_| pallas::Scalar::random(&mut rng))
                 .collect(),
             multiexp_bases: (0..max_size)
-                .map(|_| pallas::Point::random(&mut rng).to_affine())
+                .map(|_| pallas::Point::random(&mut rng).to_affine_vartime())
                 .collect(),
         }
     }
@@ -171,7 +174,7 @@ impl Permutation {
 
         iter::empty()
             .chain(Some(product))
-            .chain(iter::repeat(poly).take(self.columns))
+            .chain(std::iter::repeat_n(poly, self.columns))
     }
 }
 
@@ -212,7 +215,7 @@ impl From<CostOptions> for Circuit {
             .cloned()
             .chain(opts.lookup.iter().flat_map(|l| l.queries()))
             .chain(opts.permutation.iter().flat_map(|p| p.queries()))
-            .chain(iter::repeat("0".parse().unwrap()).take(max_deg - 1))
+            .chain(std::iter::repeat_n("0".parse().unwrap(), max_deg - 1))
             .collect();
 
         let column_queries = queries.len();
@@ -294,7 +297,7 @@ impl Circuit {
 fn main() {
     let opts = CostOptions::parse_args_default_or_exit();
     let c = Circuit::from(opts);
-    println!("{:#?}", c);
+    println!("{c:#?}");
     println!("Proof size: {} bytes", c.proof_size());
     println!(
         "Verification: at least {}ms",

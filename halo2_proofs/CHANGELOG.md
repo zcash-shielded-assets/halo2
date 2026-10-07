@@ -7,6 +7,73 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-29
+### Added
+- `halo2_proofs::plonk::VerifyingKey::dump_vesta_lean_fixture_honest_with_proof_bytes`
+  and `dump_vesta_lean_fixture_match_only_with_proof_bytes` (behind the
+  `unstable-verifier-fingerprint` feature flag): as the existing exporters,
+  additionally given the proof byte string the verifier consumed, which the
+  fixture then carries hex-encoded as `capturedProofHex`. The exporter checks
+  that re-serializing the recorded proof reads (`write_point`, `write_scalar`,
+  in read order) reproduces the supplied bytes exactly, so the emitted typed
+  proof is their canonical parse. This lets a consumer check its own
+  proof-string decoder against the bytes the deployed verifier read.
+- Every Lean fixture the `unstable-verifier-fingerprint` exporters emit now
+  carries `capturedPinnedKeyDescription`: the exact compact `Debug` rendering
+  of the pinned verifying key that `VerifyingKey::from_parts` hashes into
+  `transcript_repr`. The exporter re-hashes it and checks the scalar before
+  emitting, so a consumer can recompute the key digest and read the pinned
+  fields instead of trusting the captured scalar.
+- `halo2_proofs::circuit::AssignedCell::evaluate_vartime`
+- `halo2_proofs::circuit::Value::evaluate_vartime`
+- `halo2_proofs::plonk::Assigned::evaluate_vartime`
+
+### Changed
+- The minimum supported Rust version is now 1.88.
+- Migrated to `ff 0.14`, `group 0.14`, `rand_core 0.10`, `pasta_curves 0.6`.
+- `halo2_proofs::plonk::create_proof` now has an `R: rand_core::Rng` bound,
+  replacing the deprecated `rand_core::RngCore`. `Rng` is the infallible half
+  of the new fallible RNG interface, so a fallible source such as
+  `getrandom::SysRng` must be wrapped in `rand_core::UnwrapErr` (which panics
+  on failure, matching the old `rand_core::OsRng` behaviour).
+- The `batch` feature flag now enables an optional `rand` dependency with its
+  `sys_rng` feature, instead of `rand_core/getrandom`.
+- The following APIs now have a `pasta_curves::arithmetic::VartimeField` bound
+  and make use of variable-time inversions for improved performance:
+  - `halo2_proofs::arithmetic::lagrange_interpolate`
+  - `halo2_proofs::dev::MockProver`
+  - `halo2_proofs::plonk::FloorPlanner::synthesize`
+  - `halo2_proofs::poly::EvaluationDomain::{new, l_i_range}`
+- The following APIs now use the new `pasta_curves::arithmetic::VartimeField`
+  bound on `pasta_curves::arithmetic::CurveAffine::ScalarExt` to use
+  variable-time inversions for improved performance:
+  - `halo2_proofs::plonk::{keygen_pk, keygen_vk, create_proof, verify_proof}`
+- The following APIs now use the new `pasta_curves::arithmetic::CurveExt`
+  variable-time methods for improved performance:
+  - `halo2_proofs::plonk`:
+    - `VerifyingKey::dump_vesta_lean_fixture`
+    - `VerifyingKey::dump_vesta_lean_fixture_match_only`
+    - `{keygen_vk, create_proof, verify_proof}`
+  - `halo2_proofs::poly::commitment`:
+    - `Params::new`
+    - `{create_proof, verify_proof}`
+    - `Guard::compute_g`
+
+## [0.3.5] - 2026-08-02
+### Added
+- `halo2_proofs::plonk::VerifyingKey::dump_vesta_lean_fixture_match_only`
+  (behind the `unstable-verifier-fingerprint` feature flag), the sibling of
+  `dump_vesta_lean_fixture` for captured *non-accepting* verifier runs (such
+  as random proof strings). In place of the honest exporter's eval theorems,
+  the exported fixture proves exact coefficient/term agreement of the
+  Lean-assembled MSM with the capture (`fingerprint_matches`) and that the
+  capture is non-accepting (`capturedMsm_evalNat_ne_zero`). The export fails
+  fast if the captured MSM *is* the group identity; accepting captures must
+  use `dump_vesta_lean_fixture`. Everything else (coordinate ordering,
+  on-curve validation, URS emission, instance-commitment re-derivation, and
+  the slot-reconstruction and term-count guards) is identical to the honest
+  exporter, so regeneration stays bit-reproducible across both modes.
+
 ## [0.3.4] - 2026-07-22
 ### Changed
 - `halo2_proofs::plonk::VerifyingKey::dump_vesta_lean_fixture` (behind the

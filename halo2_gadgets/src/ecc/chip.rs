@@ -8,7 +8,7 @@ use crate::utilities::{
 use arrayvec::ArrayVec;
 
 use ff::PrimeField;
-use group::prime::PrimeCurveAffine;
+use group::CurveAffine as _;
 use halo2_proofs::{
     circuit::{AssignedCell, Chip, Layouter, Value},
     plonk::{Advice, Assigned, Column, ConstraintSystem, Error, Fixed},
@@ -20,6 +20,8 @@ use std::convert::TryInto;
 pub(super) mod add;
 pub(super) mod add_incomplete;
 pub mod constants;
+#[cfg(test)]
+pub(crate) mod layout_dump;
 pub(super) mod mul;
 pub(super) mod mul_fixed;
 pub(super) mod witness_point;
@@ -77,24 +79,30 @@ impl EccPoint {
     }
 
     /// Returns the value of this curve point, if known.
+    ///
+    /// Uses variable-time operations to evaluate the point's coordinates.
     pub fn point(&self) -> Value<pallas::Affine> {
         self.x.value().zip(self.y.value()).map(|(x, y)| {
             if x.is_zero_vartime() && y.is_zero_vartime() {
                 pallas::Affine::identity()
             } else {
-                pallas::Affine::from_xy(x.evaluate(), y.evaluate()).unwrap()
+                pallas::Affine::from_xy(x.evaluate_vartime(), y.evaluate_vartime()).unwrap()
             }
         })
     }
     /// The cell containing the affine short-Weierstrass x-coordinate,
     /// or 0 for the zero point.
+    ///
+    /// Uses variable-time operations to evaluate the cell's value.
     pub fn x(&self) -> AssignedCell<pallas::Base, pallas::Base> {
-        self.x.clone().evaluate()
+        self.x.clone().evaluate_vartime()
     }
     /// The cell containing the affine short-Weierstrass y-coordinate,
     /// or 0 for the zero point.
+    ///
+    /// Uses variable-time operations to evaluate the cell's value.
     pub fn y(&self) -> AssignedCell<pallas::Base, pallas::Base> {
-        self.y.clone().evaluate()
+        self.y.clone().evaluate_vartime()
     }
 
     #[cfg(test)]
@@ -130,19 +138,25 @@ impl NonIdentityEccPoint {
     }
 
     /// Returns the value of this curve point, if known.
+    ///
+    /// Uses variable-time operations to evaluate the point's coordinates.
     pub fn point(&self) -> Value<pallas::Affine> {
         self.x.value().zip(self.y.value()).map(|(x, y)| {
             assert!(!x.is_zero_vartime() && !y.is_zero_vartime());
-            pallas::Affine::from_xy(x.evaluate(), y.evaluate()).unwrap()
+            pallas::Affine::from_xy(x.evaluate_vartime(), y.evaluate_vartime()).unwrap()
         })
     }
     /// The cell containing the affine short-Weierstrass x-coordinate.
+    ///
+    /// Uses variable-time operations to evaluate the cell's value.
     pub fn x(&self) -> AssignedCell<pallas::Base, pallas::Base> {
-        self.x.clone().evaluate()
+        self.x.clone().evaluate_vartime()
     }
     /// The cell containing the affine short-Weierstrass y-coordinate.
+    ///
+    /// Uses variable-time operations to evaluate the cell's value.
     pub fn y(&self) -> AssignedCell<pallas::Base, pallas::Base> {
-        self.y.clone().evaluate()
+        self.y.clone().evaluate_vartime()
     }
 }
 
@@ -650,7 +664,7 @@ where
     ) -> Result<(Self::Point, Self::ScalarFixed), Error> {
         let config = self.config().mul_fixed_full.clone();
         config.assign(
-            layouter.namespace(|| format!("fixed-base mul of {:?}", base)),
+            layouter.namespace(|| format!("fixed-base mul of {base:?}")),
             scalar,
             base,
         )
@@ -664,7 +678,7 @@ where
     ) -> Result<(Self::Point, Self::ScalarFixedShort), Error> {
         let config = self.config().mul_fixed_short.clone();
         config.assign(
-            layouter.namespace(|| format!("short fixed-base mul of {:?}", base)),
+            layouter.namespace(|| format!("short fixed-base mul of {base:?}")),
             scalar,
             base,
         )
@@ -678,7 +692,7 @@ where
     ) -> Result<Self::Point, Error> {
         let config = self.config().mul_fixed_base_field.clone();
         config.assign(
-            layouter.namespace(|| format!("base-field elem fixed-base mul of {:?}", base)),
+            layouter.namespace(|| format!("base-field elem fixed-base mul of {base:?}")),
             base_field_elem,
             base,
         )

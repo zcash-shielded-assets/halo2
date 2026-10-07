@@ -26,11 +26,15 @@ jobs:
             extra_flags: --features nightly
 
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: prepare
         uses: ./.github/actions/prepare
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.stage }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run tests
         env:
           FEATURE_FLAGS: ${{ steps.prepare.outputs.feature-flags }}
@@ -57,7 +61,7 @@ jobs:
             name_suffix: " with nightly features"
 
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: prepare
@@ -65,8 +69,15 @@ jobs:
         with:
           beta-features: ${{ matrix.stage == 'beta' }}
           nightly-features: ${{ matrix.stage == 'nightly' }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.stage }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cross-platform support dependencies
-        run: sudo apt install gcc-multilib
+        # `apt-get update` first: the runner image ships a package index that goes stale when the
+        # image rolls, after which `install` cannot resolve `gcc-multilib`. That is what broke every
+        # `i686-unknown-linux-gnu` job from the 2026-07-30 image onward, before any Rust was built.
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
       - run: rustup target add i686-unknown-linux-gnu
       - name: Run tests
         env:
@@ -86,10 +97,10 @@ jobs:
       matrix:
         target:
           - wasm32-unknown-unknown
-          - wasm32-wasi
+          - wasm32-wasip1
 
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: prepare
@@ -97,8 +108,16 @@ jobs:
         with:
           nightly-features: true
           test-dependencies: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Add target
         run: rustup target add ${{ matrix.target }}
+      # We depend on `rand/sys-rng`, which means we need to enable `getrandom/wasm_js`.
+      - name: Enable getrandom/wasm_js
+        if: matrix.target == 'wasm32-unknown-unknown'
+        run: cargo add -p halo2_proofs --features wasm_js getrandom
       - name: cargo build
         env:
           FEATURE_FLAGS: ${{ steps.prepare.outputs.feature-flags }}
@@ -111,7 +130,7 @@ jobs:
     name: Bitrot check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/prepare
@@ -125,6 +144,9 @@ jobs:
         shell: sh
         env:
           TOOLCHAIN: ${{steps.toolchain.outputs.name}}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: sudo apt-get -y install libfontconfig1-dev
       # Build benchmarks and all-features to prevent bitrot
       - name: Build benchmarks
@@ -134,7 +156,7 @@ jobs:
     name: Book tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/prepare
@@ -147,6 +169,9 @@ jobs:
         shell: sh
         env:
           TOOLCHAIN: ${{steps.toolchain.outputs.name}}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo build
         run: cargo build
       - name: Setup mdBook
@@ -163,13 +188,16 @@ jobs:
       image: xd009642/tarpaulin:develop-nightly
       options: --security-opt seccomp=unconfined
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: prepare
         uses: ./.github/actions/prepare
         with:
           nightly-features: true
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Extend the timeout to 3600 to ensure the code coverage test pass
       - name: Generate coverage report
         env:
@@ -187,10 +215,13 @@ jobs:
     name: Intra-doc links
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/prepare
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: sudo apt-get -y install libfontconfig1-dev
       - run: cargo fetch
       # Ensure intra-documentation links all resolve correctly
@@ -203,7 +234,7 @@ jobs:
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/prepare

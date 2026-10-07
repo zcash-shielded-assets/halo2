@@ -6,6 +6,7 @@ use std::iter;
 use std::ops::{Add, Mul, Neg, Range};
 
 use ff::Field;
+use pasta_curves::arithmetic::VartimeField;
 
 use crate::plonk::Assigned;
 use crate::{
@@ -30,6 +31,10 @@ pub use gates::CircuitGates;
 
 mod tfp;
 pub use tfp::TracingFloorPlanner;
+
+#[cfg(feature = "unstable-circuit-fixtures")]
+#[cfg_attr(docsrs, doc(cfg(feature = "unstable-circuit-fixtures")))]
+pub mod circuit_fixture;
 
 #[cfg(feature = "dev-graph")]
 mod graph;
@@ -310,7 +315,7 @@ impl<F: Field> InstanceValue<F> {
     }
 }
 
-impl<F: Field> Assignment<F> for MockProver<F> {
+impl<F: VartimeField> Assignment<F> for MockProver<F> {
     fn enter_region<NR, N>(&mut self, name: N)
     where
         NR: Into<String>,
@@ -397,7 +402,7 @@ impl<F: Field> Assignment<F> for MockProver<F> {
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
             .ok_or(Error::BoundsFailure)? =
-            CellValue::Assigned(to().into_field().evaluate().assign()?);
+            CellValue::Assigned(to().into_field().evaluate_vartime().assign()?);
 
         Ok(())
     }
@@ -429,7 +434,7 @@ impl<F: Field> Assignment<F> for MockProver<F> {
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
             .ok_or(Error::BoundsFailure)? =
-            CellValue::Assigned(to().into_field().evaluate().assign()?);
+            CellValue::Assigned(to().into_field().evaluate_vartime().assign()?);
 
         Ok(())
     }
@@ -479,7 +484,7 @@ impl<F: Field> Assignment<F> for MockProver<F> {
     }
 }
 
-impl<F: Field + Ord> MockProver<F> {
+impl<F: VartimeField + Ord> MockProver<F> {
     /// Runs a synthetic keygen-and-prove operation on the given circuit, collecting data
     /// about the constraints and their assignments.
     pub fn run<ConcreteCircuit: Circuit<F>>(

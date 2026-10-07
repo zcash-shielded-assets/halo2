@@ -2,10 +2,7 @@
 //! field and polynomial arithmetic.
 
 pub use ff::Field;
-use group::{
-    ff::{BatchInvert, PrimeField},
-    Group as _, GroupOpsOwned, ScalarMulOwned,
-};
+use group::{ff::PrimeField, Group as _, GroupOpsOwned, ScalarMulOwned};
 use maybe_rayon::prelude::*;
 pub use pasta_curves::arithmetic::*;
 
@@ -376,7 +373,7 @@ fn log2_floor(num: usize) -> u32 {
 /// Returns coefficients of an n - 1 degree polynomial given a set of n points
 /// and their evaluations. This function will panic if two values in `points`
 /// are the same.
-pub fn lagrange_interpolate<F: Field>(points: &[F], evals: &[F]) -> Vec<F> {
+pub fn lagrange_interpolate<F: VartimeField>(points: &[F], evals: &[F]) -> Vec<F> {
     assert_eq!(points.len(), evals.len());
     if points.len() == 1 {
         // Constant polynomial
@@ -396,7 +393,10 @@ pub fn lagrange_interpolate<F: Field>(points: &[F], evals: &[F]) -> Vec<F> {
             denoms.push(denom);
         }
         // Compute (x_j - x_k)^(-1) for each j != i
-        denoms.iter_mut().flat_map(|v| v.iter_mut()).batch_invert();
+        denoms
+            .iter_mut()
+            .flat_map(|v| v.iter_mut())
+            .batch_invert_vartime();
 
         let mut final_poly = vec![F::ZERO; points.len()];
         for (j, (denoms, eval)) in denoms.into_iter().zip(evals.iter()).enumerate() {
@@ -432,19 +432,23 @@ pub fn lagrange_interpolate<F: Field>(points: &[F], evals: &[F]) -> Vec<F> {
 }
 
 #[cfg(test)]
-use rand_core::OsRng;
+use rand::rngs::SysRng;
+#[cfg(test)]
+use rand_core::UnwrapErr;
 
 #[cfg(test)]
 use crate::pasta::{Eq, EqAffine, Fp};
 
 #[test]
 fn test_multiexp() {
-    let rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let k = 8;
 
-    let coeffs = (0..(1 << k)).map(|_| Fp::random(rng)).collect::<Vec<_>>();
+    let coeffs = (0..(1 << k))
+        .map(|_| Fp::random(&mut rng))
+        .collect::<Vec<_>>();
     let bases = (0..(1 << k))
-        .map(|_| EqAffine::from(Eq::random(rng)))
+        .map(|_| EqAffine::from(Eq::random(&mut rng)))
         .collect::<Vec<_>>();
 
     let expected = best_multiexp(&coeffs, &bases);
@@ -459,10 +463,10 @@ fn test_multiexp() {
 
 #[test]
 fn test_lagrange_interpolate() {
-    let rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
 
-    let points = (0..5).map(|_| Fp::random(rng)).collect::<Vec<_>>();
-    let evals = (0..5).map(|_| Fp::random(rng)).collect::<Vec<_>>();
+    let points = (0..5).map(|_| Fp::random(&mut rng)).collect::<Vec<_>>();
+    let evals = (0..5).map(|_| Fp::random(&mut rng)).collect::<Vec<_>>();
 
     for coeffs in 0..5 {
         let points = &points[0..coeffs];

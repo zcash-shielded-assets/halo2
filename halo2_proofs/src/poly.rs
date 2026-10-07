@@ -5,7 +5,8 @@
 use crate::arithmetic::parallelize;
 use crate::plonk::Assigned;
 
-use group::ff::{BatchInvert, Field};
+use group::ff::Field;
+use pasta_curves::arithmetic::{VartimeBatchInvert, VartimeField};
 
 use std::fmt::Debug;
 use std::marker::PhantomData;
@@ -132,7 +133,7 @@ impl<F, B> Polynomial<F, B> {
     }
 }
 
-pub(crate) fn batch_invert_assigned<F: Field>(
+pub(crate) fn batch_invert_assigned<F: VartimeField>(
     assigned: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
 ) -> Vec<Polynomial<F, LagrangeCoeff>> {
     let mut assigned_denominators: Vec<_> = assigned
@@ -152,7 +153,7 @@ pub(crate) fn batch_invert_assigned<F: Field>(
                 // size of the batch inversion.
                 .filter_map(|d| d.as_mut())
         })
-        .batch_invert();
+        .batch_invert_vartime();
 
     assigned
         .iter()
@@ -326,7 +327,8 @@ impl Rotation {
 mod tests {
     use ff::Field;
     use pasta_curves::pallas;
-    use rand_core::OsRng;
+    use rand::rngs::SysRng;
+    use rand_core::UnwrapErr;
 
     use super::{EvaluationDomain, Rotation};
 
@@ -338,7 +340,7 @@ mod tests {
         // Create a random polynomial.
         let mut poly = domain.empty_lagrange();
         for coefficient in poly.iter_mut() {
-            *coefficient = pallas::Base::random(OsRng);
+            *coefficient = pallas::Base::random(&mut UnwrapErr(SysRng));
         }
 
         // Pick a chunk size that is guaranteed to not be a multiple of the polynomial

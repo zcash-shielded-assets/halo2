@@ -16,7 +16,8 @@ use halo2_proofs::plonk::{
 use halo2_proofs::poly::commitment::{Guard, MSM};
 use halo2_proofs::poly::{commitment::Params, Rotation};
 use halo2_proofs::transcript::{Blake2bRead, Blake2bWrite, Challenge255, EncodedChallenge};
-use rand_core::OsRng;
+use rand::rngs::SysRng;
+use rand_core::UnwrapErr;
 use std::marker::PhantomData;
 
 #[test]
@@ -435,7 +436,7 @@ fn plonk_api() {
     // Check this circuit is satisfied.
     let prover = match MockProver::run(K, &circuit, vec![pubinputs.clone()]) {
         Ok(prover) => prover,
-        Err(e) => panic!("{:?}", e),
+        Err(e) => panic!("{e:?}"),
     };
     assert_eq!(prover.verify(), Ok(()));
 
@@ -447,7 +448,7 @@ fn plonk_api() {
             &pk,
             &[circuit.clone(), circuit.clone()],
             &[&[&[instance]], &[&[instance]]],
-            OsRng,
+            UnwrapErr(SysRng),
             &mut transcript,
         )
         .expect("proof generation should not fail");
@@ -481,7 +482,7 @@ fn plonk_api() {
             &pk,
             &[circuit.clone(), circuit.clone()],
             &[&[&[instance]], &[&[instance]]],
-            OsRng,
+            UnwrapErr(SysRng),
             &mut transcript,
         )
         .expect("proof generation should not fail");
@@ -626,7 +627,7 @@ fn plonk_api() {
             // A rejecting capture is checked only in Rust (it is never exported to Lean): verify the
             // same proof bytes against the wrong public inputs. Every read still parses (the proof is
             // unchanged), so capture succeeds, but the assembled MSM is non-identity.
-            let wrong_pubinputs = vec![instance + Fp::ONE];
+            let wrong_pubinputs = [instance + Fp::ONE];
             let mut reject_transcript =
                 ChallengeRecorder::<_, _, Challenge255<_>>::init(&proof[..]);
             let reject_msm = capture_proof_fingerprint(

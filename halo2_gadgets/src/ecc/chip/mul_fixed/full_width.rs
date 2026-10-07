@@ -163,14 +163,14 @@ impl<Fixed: FixedPoints<pallas::Affine>> Config<Fixed> {
         // Check that the correct multiple is obtained.
         {
             use super::super::FixedPoint;
-            use group::Curve;
+            use pasta_curves::arithmetic::CurveExt;
 
             let real_mul = scalar.value.map(|scalar| base.generator() * scalar);
             let result = result.point();
 
             real_mul
                 .zip(result)
-                .assert_if_known(|(real_mul, result)| &real_mul.to_affine() == result);
+                .assert_if_known(|(real_mul, result)| &real_mul.to_affine_vartime() == result);
         }
 
         Ok((result, scalar))
@@ -179,13 +179,13 @@ impl<Fixed: FixedPoints<pallas::Affine>> Config<Fixed> {
 
 #[cfg(test)]
 pub mod tests {
-    use group::{ff::Field, Curve};
+    use group::ff::Field;
     use halo2_proofs::{
         circuit::{Layouter, Value},
         plonk::Error,
     };
-    use pasta_curves::pallas;
-    use rand::rngs::OsRng;
+    use pasta_curves::{arithmetic::CurveExt, pallas};
+    use rand::{rand_core::UnwrapErr, rngs::SysRng};
 
     use crate::{
         ecc::{
@@ -228,14 +228,14 @@ pub mod tests {
             let expected = NonIdentityPoint::new(
                 chip,
                 layouter.namespace(|| "expected point"),
-                Value::known((base_val * scalar_val).to_affine()),
+                Value::known((base_val * scalar_val).to_affine_vartime()),
             )?;
             result.constrain_equal(layouter.namespace(|| "constrain result"), &expected)
         }
 
         // [a]B
         {
-            let scalar_fixed = pallas::Scalar::random(OsRng);
+            let scalar_fixed = pallas::Scalar::random(&mut UnwrapErr(SysRng));
             let by = ScalarFixed::new(
                 chip.clone(),
                 layouter.namespace(|| "random a"),

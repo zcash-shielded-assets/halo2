@@ -194,7 +194,7 @@ pub fn decompose_word<F: PrimeFieldBits>(
         .to_le_bits()
         .into_iter()
         .take(word_num_bits)
-        .chain(std::iter::repeat(false).take(padding))
+        .chain(std::iter::repeat_n(false, padding))
         .collect();
     assert_eq!(bits.len(), word_num_bits + padding);
 
@@ -249,7 +249,7 @@ mod tests {
     };
     use pasta_curves::pallas;
     use proptest::prelude::*;
-    use rand::rngs::OsRng;
+    use rand::{rand_core::UnwrapErr, rngs::SysRng};
     use std::convert::TryInto;
     use std::iter;
     use uint::construct_uint;
@@ -337,9 +337,10 @@ mod tests {
 
     #[allow(clippy::assign_op_pattern)]
     #[allow(clippy::ptr_offset_with_cast)]
+    #[allow(clippy::manual_div_ceil)]
     #[test]
     fn test_bitrange_subset() {
-        let rng = OsRng;
+        let mut rng = UnwrapErr(SysRng);
 
         construct_uint! {
             struct U256(4);
@@ -347,7 +348,7 @@ mod tests {
 
         // Subset full range.
         {
-            let field_elem = pallas::Base::random(rng);
+            let field_elem = pallas::Base::random(&mut rng);
             let bitrange = 0..(pallas::Base::NUM_BITS as usize);
             let subset = bitrange_subset(&field_elem, bitrange);
             assert_eq!(field_elem, subset);
@@ -355,7 +356,7 @@ mod tests {
 
         // Subset zero bits
         {
-            let field_elem = pallas::Base::random(rng);
+            let field_elem = pallas::Base::random(&mut rng);
             let bitrange = 0..0;
             let subset = bitrange_subset(&field_elem, bitrange);
             assert_eq!(pallas::Base::ZERO, subset);
@@ -404,13 +405,13 @@ mod tests {
             assert_eq!(field_elem, sum);
         };
 
-        decompose(pallas::Base::random(rng), &[0..255; 1]);
-        decompose(pallas::Base::random(rng), &[0..1, 1..255]);
-        decompose(pallas::Base::random(rng), &[0..254, 254..255]);
-        decompose(pallas::Base::random(rng), &[0..127, 127..255]);
-        decompose(pallas::Base::random(rng), &[0..128, 128..255]);
+        decompose(pallas::Base::random(&mut rng), &[0..255; 1]);
+        decompose(pallas::Base::random(&mut rng), &[0..1, 1..255]);
+        decompose(pallas::Base::random(&mut rng), &[0..254, 254..255]);
+        decompose(pallas::Base::random(&mut rng), &[0..127, 127..255]);
+        decompose(pallas::Base::random(&mut rng), &[0..128, 128..255]);
         decompose(
-            pallas::Base::random(rng),
+            pallas::Base::random(&mut rng),
             &[0..50, 50..100, 100..150, 150..200, 200..255],
         );
     }
@@ -453,9 +454,9 @@ mod tests {
 
     #[test]
     fn lebs2ip_round_trip() {
-        use rand::rngs::OsRng;
+        use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 
-        let mut rng = OsRng;
+        let mut rng = UnwrapErr(SysRng);
         {
             let int = rng.next_u64();
             assert_eq!(lebs2ip::<64>(&i2lebsp(int)), int);

@@ -4,8 +4,10 @@
 //! identically and its two proofs share public inputs, so the captured MSM merges those same-base
 //! terms and the exporter's duplicate-base guard (correctly) rejects it. This test uses a small
 //! circuit whose commitment bases are all distinct and non-identity, so `dump_vesta_lean_fixture`
-//! runs to completion and we can assert the emitted accepting fixture. A companion test confirms
-//! the exporter's identity fail-fast refuses a non-identity (rejecting) capture.
+//! runs to completion and we can assert the emitted accepting fixture. Companion tests confirm
+//! the exporter's identity fail-fast refuses a non-identity (rejecting) capture, that the
+//! match-only exporter emits exactly such captures without eval theorems, and that it refuses
+//! accepting captures in turn.
 #![cfg(feature = "unstable-verifier-fingerprint")]
 
 use group::ff::{Field, PrimeField};
@@ -20,7 +22,8 @@ use halo2_proofs::plonk::{
 use halo2_proofs::poly::commitment::Params;
 use halo2_proofs::poly::Rotation;
 use halo2_proofs::transcript::{Blake2bRead, Blake2bWrite, Challenge255};
-use rand_core::OsRng;
+use rand::rngs::SysRng;
+use rand_core::UnwrapErr;
 
 const K: u32 = 5;
 
@@ -156,7 +159,7 @@ fn prove() -> (
         &pk,
         &[circuit],
         &[&[&[product]]],
-        OsRng,
+        UnwrapErr(SysRng),
         &mut transcript,
     )
     .expect("proof generation");
@@ -168,7 +171,7 @@ fn prove() -> (
 #[test]
 fn exports_accepting_fixture() {
     let (params, pk, product, proof) = prove();
-    let pubinputs = vec![product];
+    let pubinputs = [product];
 
     // The proof verifies, so the captured fingerprint is the group identity.
     let strategy = SingleVerifier::new(&params);
@@ -199,9 +202,15 @@ fn exports_accepting_fixture() {
         &transcript,
         &msm,
     );
+    // Without proof bytes the fixture carries none: the field is opt-in.
+    assert!(!fixture.contains("capturedProofHex"));
     for expected in [
         "namespace Halo2.Fixture.Render",
         "def shape : Shape",
+        // `RenderCircuit` has one instance column, emitted into the shape literal so the Lean
+        // `CircuitShape` never has to fall back to a default for it.
+        "numInstanceColumns := 1",
+        "def capturedNumInstanceColumns : ℕ := shape.numInstanceColumns",
         "theorem capturedUrsG_length : capturedUrsG.length = 2 ^ shape.k",
         "def vk : VerifyingKey shape Fp G",
         "def ps : ProofString shape Fp G",
@@ -267,7 +276,7 @@ fn exports_accepting_fixture() {
 #[test]
 fn rejects_non_identity_capture() {
     let (params, pk, product, proof) = prove();
-    let wrong_pubinputs = vec![product + Fp::ONE];
+    let wrong_pubinputs = [product + Fp::ONE];
 
     let mut transcript = ChallengeRecorder::<_, _, Challenge255<_>>::init(&proof[..]);
     let msm = capture_proof_fingerprint(
@@ -308,6 +317,212 @@ fn rejects_non_identity_capture() {
         .expect("exporter fail-fast panics with a string message");
     assert!(
         panic_msg.contains("must evaluate to the identity"),
+        "exporter panicked for an unexpected reason: {panic_msg}"
+    );
+}
+
+/// The `_with_proof_bytes` exporters carry the consumed proof string as `capturedProofHex`, after
+/// checking that the recorded reads re-serialize to exactly those bytes; a string the reads do not
+/// reproduce (here, one byte short) is refused.
+#[test]
+fn exports_proof_bytes_and_refuses_mismatched_ones() {
+    let (params, pk, product, proof) = prove();
+    let pubinputs = [product];
+
+    let mut transcript = ChallengeRecorder::<_, _, Challenge255<_>>::init(&proof[..]);
+    let msm =
+        capture_proof_fingerprint(&params, pk.get_vk(), &[&[&pubinputs[..]]], &mut transcript)
+            .expect("fingerprint capture");
+
+    let fixture = pk.get_vk().dump_vesta_lean_fixture_honest_with_proof_bytes(
+        "Halo2.Fixture.RenderBytes",
+        "render_bytes",
+        K,
+        &[&[&pubinputs[..]]],
+        &transcript,
+        &msm,
+        &proof,
+    );
+    let hex: String = proof.iter().map(|b| format!("{b:02x}")).collect();
+    assert!(fixture.contains("def capturedProofHex : String :=\n"));
+    assert!(fixture.contains(&format!("  {hex:?}\n")));
+
+    // Every fixture also carries the exact pinned-key text `transcript_repr` hashes.
+    let pinned = format!("{:?}", pk.get_vk().pinned());
+    assert!(fixture.contains("def capturedPinnedKeyDescription : String :=\n"));
+    assert!(fixture.contains(&format!("  {pinned:?}\n")));
+
+    // The match-only sibling emits the same data for a parseable non-accepting run.
+    let wrong_pubinputs = [product + Fp::ONE];
+    let mut transcript = ChallengeRecorder::<_, _, Challenge255<_>>::init(&proof[..]);
+    let msm = capture_proof_fingerprint(
+        &params,
+        pk.get_vk(),
+        &[&[&wrong_pubinputs[..]]],
+        &mut transcript,
+    )
+    .expect("fingerprint capture for a parseable rejecting proof");
+    let fixture = pk
+        .get_vk()
+        .dump_vesta_lean_fixture_match_only_with_proof_bytes(
+            "Halo2.Fixture.RenderBytesMatchOnly",
+            "render_bytes_match_only",
+            K,
+            &[&[&wrong_pubinputs[..]]],
+            &transcript,
+            &msm,
+            &proof,
+        );
+    assert!(fixture.contains(&format!("  {hex:?}\n")));
+
+    // A byte string the recorded reads do not reproduce is refused before anything is emitted.
+    let mut transcript = ChallengeRecorder::<_, _, Challenge255<_>>::init(&proof[..]);
+    let msm =
+        capture_proof_fingerprint(&params, pk.get_vk(), &[&[&pubinputs[..]]], &mut transcript)
+            .expect("fingerprint capture");
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let export_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pk.get_vk().dump_vesta_lean_fixture_honest_with_proof_bytes(
+            "Halo2.Fixture.RenderBytesShort",
+            "render_bytes_short",
+            K,
+            &[&[&pubinputs[..]]],
+            &transcript,
+            &msm,
+            &proof[..proof.len() - 1],
+        )
+    }));
+    std::panic::set_hook(prev_hook);
+    let err =
+        export_result.expect_err("exporter must refuse proof bytes the reads do not reproduce");
+    let panic_msg = err
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    assert!(
+        panic_msg.contains("proof_bytes must be exactly the bytes"),
+        "unexpected panic message: {panic_msg}"
+    );
+}
+
+/// The match-only exporter emits a fixture for a non-identity capture: the same wrong-public-input
+/// run `rejects_non_identity_capture` uses (the capture ran with those inputs, so the exporter's
+/// instance re-derivation passes), exported with the match theorem and neither eval theorem.
+#[test]
+fn exports_match_only_fixture_for_non_identity_capture() {
+    let (params, pk, product, proof) = prove();
+    let wrong_pubinputs = [product + Fp::ONE];
+
+    let mut transcript = ChallengeRecorder::<_, _, Challenge255<_>>::init(&proof[..]);
+    let msm = capture_proof_fingerprint(
+        &params,
+        pk.get_vk(),
+        &[&[&wrong_pubinputs[..]]],
+        &mut transcript,
+    )
+    .expect("fingerprint capture for a parseable rejecting proof");
+    assert!(
+        !msm.clone().eval(),
+        "an invalid proof's fingerprint must be non-identity"
+    );
+
+    let fixture = pk.get_vk().dump_vesta_lean_fixture_match_only(
+        "Halo2.Fixture.RenderMatchOnly",
+        "render_match_only",
+        K,
+        &[&[&wrong_pubinputs[..]]],
+        &transcript,
+        &msm,
+    );
+    assert!(!fixture.contains("capturedProofHex"));
+    for expected in [
+        "-- Auto-generated by halo2 `dump_vesta_lean_fixture_match_only`. Do not edit by hand.",
+        "-- Match-only capture: the deployed verifier ran to completion, but the captured",
+        "namespace Halo2.Fixture.RenderMatchOnly",
+        "def shape : Shape",
+        // The shape literal and `capturedNumInstanceColumns` are mode-independent.
+        "numInstanceColumns := 1",
+        "def capturedNumInstanceColumns : ℕ := shape.numInstanceColumns",
+        "theorem capturedUrsG_length : capturedUrsG.length = 2 ^ shape.k",
+        "def vk : VerifyingKey shape Fp G",
+        "def ps : ProofString shape Fp G",
+        "def ch : Challenges shape.k Fp",
+        "def capturedMsm : Msm shape.k Fp G",
+        "theorem fingerprint_matches",
+        // Instance-commitment derivation (public inputs -> C_inst) is mode-independent.
+        "def capturedUrsGLagrange : List G",
+        "def capturedPublicInstances : List (List Fp)",
+        "def commitLagrange (coeffs : List Fp) : G",
+        "def derivedInstanceCommitment (p : Fin shape.numProofs) (i : ℕ) : G",
+        "theorem capturedPublicInstances_within_lagrange",
+        "theorem instance_commitments_derived :\n    capturedPublicInstances.map commitLagrange = capturedInstanceCommitments := by native_decide",
+        "MsmMatch (assemble vk derivedInstanceCommitment ps ch) capturedMsm",
+        "end Halo2.Fixture.RenderMatchOnly",
+    ] {
+        assert!(
+            fixture.contains(expected),
+            "match-only fixture is missing `{expected}`"
+        );
+    }
+    // The honest eval theorems are absent -- they would be false here -- and the mirrored `≠ 0`
+    // theorem stands in their place, so the fixture proves its own mode instead of asserting it in
+    // a header comment.
+    assert!(
+        !fixture.contains("capturedMsm_eval_eq_zero"),
+        "match-only fixture must not emit `capturedMsm_eval_eq_zero`"
+    );
+    assert!(
+        !fixture.contains("assembledMsm_eval_eq_zero"),
+        "match-only fixture must not emit `assembledMsm_eval_eq_zero`"
+    );
+    assert!(
+        fixture.contains(
+            "theorem capturedMsm_evalNat_ne_zero : capturedMsm.evalNat capturedURS ≠ 0 := by native_decide"
+        ),
+        "match-only fixture must prove the captured MSM is not the identity"
+    );
+}
+
+/// The match-only exporter's fail-fast is the mirror image of the honest one: an *accepting*
+/// capture must be refused, so a mislabeled honest run cannot masquerade as a random match-only
+/// fixture.
+#[test]
+fn match_only_export_rejects_identity_capture() {
+    let (params, pk, product, proof) = prove();
+    let pubinputs = [product];
+
+    let mut transcript = ChallengeRecorder::<_, _, Challenge255<_>>::init(&proof[..]);
+    let msm =
+        capture_proof_fingerprint(&params, pk.get_vk(), &[&[&pubinputs[..]]], &mut transcript)
+            .expect("fingerprint capture");
+    assert!(
+        msm.clone().eval(),
+        "a valid proof's fingerprint must be the identity"
+    );
+
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let export_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pk.get_vk().dump_vesta_lean_fixture_match_only(
+            "Halo2.Fixture.RenderMatchOnlyReject",
+            "render_match_only_reject",
+            K,
+            &[&[&pubinputs[..]]],
+            &transcript,
+            &msm,
+        )
+    }));
+    std::panic::set_hook(prev_hook);
+    let err = export_result.expect_err("match-only exporter must refuse an identity capture");
+    let panic_msg = err
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| err.downcast_ref::<String>().cloned())
+        .expect("exporter fail-fast panics with a string message");
+    assert!(
+        panic_msg.contains("match-only fixtures capture non-accepting runs"),
         "exporter panicked for an unexpected reason: {panic_msg}"
     );
 }
